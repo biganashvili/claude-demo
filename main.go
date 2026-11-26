@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -14,13 +15,13 @@ import (
 )
 
 func main() {
-	e := echo.New()
-	e.HideBanner = true
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	e.Use(middleware.Logger())
-	e.Use(middleware.Recover())
-
-	e.GET("/health", health)
+func run() error {
+	e := newServer()
 
 	e.Server.ReadHeaderTimeout = 5 * time.Second
 	e.Server.ReadTimeout = 10 * time.Second
@@ -35,19 +36,41 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	errCh := make(chan error, 1)
 	go func() {
-		if err := e.Start(":" + port); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			e.Logger.Fatal(err)
-		}
+		errCh <- e.Start(":" + port)
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-errCh:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := e.Shutdown(shutdownCtx); err != nil {
-		e.Logger.Fatal(err)
+		return err
 	}
+	if err := <-errCh; !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func newServer() *echo.Echo {
+	e := echo.New()
+	e.HideBanner = true
+
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
+
+	e.GET("/health", health)
+
+	return e
 }
 
 func health(c echo.Context) error {
